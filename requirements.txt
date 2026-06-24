@@ -1,9 +1,7 @@
 streamlit
-python-dotenv
+langchain
 langchain-community
-sentence-transformers
 faiss-cpu
-huggingface_hub
-transformers
-torch
 pandas
+python-dotenv
+scikit-learn

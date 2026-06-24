@@ -1,96 +1,82 @@
 import os
+import pickle
 import streamlit as st
-from dotenv import load_dotenv
-
-from huggingface_hub import InferenceClient
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEmbeddings
+from typing import List
 
-# -------------------------------
-# Load environment variables
-# -------------------------------
-load_dotenv()
+VECTOR_PATH = os.path.join("vector_store", "tfidf_vectorizer.pkl")
 
-HF_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+class LocalEmbeddings:
+    def __init__(self):
+        if not os.path.exists(VECTOR_PATH):
+            raise FileNotFoundError(
+                "TF-IDF vectorizer not found. Run ingest.py first to create vector_store."
+            )
+        with open(VECTOR_PATH, "rb") as f:
+            self.vectorizer = pickle.load(f)
 
-if not HF_TOKEN:
-    st.error("HUGGINGFACEHUB_API_TOKEN not found in .env file")
-    st.stop()
+    def embed_documents(self, texts: List[str]):
+        if self.vectorizer is None:
+            raise ValueError("Vectorizer is not loaded. Run ingest.py first.")
+        vectors = self.vectorizer.transform(texts)
+        return vectors.astype("float32").toarray().tolist()
 
-# -------------------------------
-# Hugging Face Client
-# -------------------------------
-client = InferenceClient(model="HuggingFaceH4/zephyr-7b-beta", token=HF_TOKEN)
+    def embed_query(self, text: str):
+        if self.vectorizer is None:
+            raise ValueError("Vectorizer is not loaded. Run ingest.py first.")
+        vector = self.vectorizer.transform([text])
+        return vector.astype("float32").toarray()[0].tolist()
 
-# -------------------------------
-# Embeddings model
-# -------------------------------
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+    def __call__(self, text):
+        if isinstance(text, list):
+            return self.embed_documents(text)
+        return self.embed_query(text)
 
-# -------------------------------
-# Load FAISS Database
-# -------------------------------
-try:
-    db = FAISS.load_local(
-        "vector_store/faiss_index",
-        embeddings,
-        allow_dangerous_deserialization=True
+
+def build_answer(question: str, docs):
+    if not docs:
+        return "I couldn't find matching movie information. Try another question."
+
+    question_lower = question.lower()
+    if "director" in question_lower or "directed" in question_lower:
+        return "\n\n".join(
+            [doc.page_content for doc in docs if "Director:" in doc.page_content][:3]
+        ) or "I found relevant movie entries, but no director line was available."
+
+    if "genre" in question_lower:
+        return "\n\n".join(
+            [doc.page_content for doc in docs if "Genre:" in doc.page_content][:3]
+        ) or "I found relevant movie entries, but no genre line was available."
+
+    if "rating" in question_lower or "rate" in question_lower:
+        return "\n\n".join(
+            [doc.page_content for doc in docs if "Rating:" in doc.page_content][:3]
+        ) or "I found relevant movie entries, but no rating line was available."
+
+    return (
+        "I found these relevant movie entries based on your question:\n\n"
+        + "\n\n".join([doc.page_content for doc in docs[:3]])
     )
-except Exception as e:
-    st.error(f"Error loading FAISS index: {e}")
-    st.stop()
 
-# -------------------------------
-# Streamlit UI
-# -------------------------------
 st.set_page_config(
     page_title="Movie Chatbot",
-    page_icon="🎬",
-    layout="wide"
+    page_icon="🎬"
 )
 
-st.title("🎬 Movie Question Answer Chatbot")
-st.write("Ask anything about movies.")
+st.title("🎬 Movie Chatbot")
 
-question = st.text_input("Enter your question:")
+embeddings = LocalEmbeddings()
 
-if st.button("Get Answer"):
+db = FAISS.load_local(
+    "vector_store/faiss_index",
+    embeddings,
+    allow_dangerous_deserialization=True
+)
 
-    if question.strip() == "":
-        st.warning("Please enter a question.")
+question = st.text_input("Ask About Movies")
 
-    else:
-        docs = db.similarity_search(question, k=3)
-        context = "\n\n".join([doc.page_content for doc in docs])
+if question:
 
-        prompt = f"""
-You are an expert Movie Assistant.
-
-Use only the context below.
-
-Context:
-{context}
-
-Question:
-{question}
-
-Give a detailed and accurate answer.
-"""
-
-        try:
-            # ✅ Use text_generation instead of conversational
-            response = client.text_generation(
-                prompt,
-                max_new_tokens=300,
-                temperature=0.3,
-            )
-
-            # ✅ Response is already plain text
-            st.success("Answer")
-            st.info(response)
-
-        except Exception as e:
-            st.error("⚠️ Something went wrong while generating the answer.")
-            st.text(str(e))
+    docs = db.similarity_search(question, k=3)
+    answer = build_answer(question, docs)
+    st.write(answer)
